@@ -5,14 +5,19 @@
 #include <fcntl.h>
 #include <sys/time.h>
 #include <semaphore.h>
+#include <curses.h>
 #import <QTKit/QTKit.h>
 
+
+#define MAX_(x, y) ((x) > (y) ? (x) : (y))
+#define MIN_(x, y) ((x) < (y) ? (x) : (y))
+
 sem_t sync_sem;
+
+
 void syncInit(){sem_init(&sync_sem,0,1);}
 void syncStart(){sem_wait(&sync_sem);}
 void syncEnd(){sem_post(&sync_sem);}
-
-
 
 int WIDTH=0,HEIGHT=0;
 int WOFFSET=0;
@@ -22,6 +27,27 @@ void getWinSize(){
 	ioctl(STDOUT_FILENO,TIOCGWINSZ,&ws);
 	WIDTH=ws.ws_col;HEIGHT=ws.ws_row;
 }
+
+void cursesInit()
+{
+	if(!initscr()) {
+		printf("Error initializing screen.\n");
+		exit(1);
+	}
+	if(!has_colors()) {
+		printf("This terminal does not support colours.\n");
+		exit(1);
+	}
+	use_default_colors();
+	start_color();
+	nonl();
+
+	for (int i = 0; i <= 255; i++){
+		init_pair(i, -1, i);
+	}
+	curs_set(1);
+}
+
 namespace Request{
 	bool quit=false;
 	bool render=false;
@@ -33,14 +59,15 @@ namespace FrameImage{
 	bool colorFlip=false;
 	int MAXWIDTH,MAXHEIGHT;
 	int originalWidth,originalHeight;
-	float*originalData=NULL;
-	float*scaledData=NULL;
+	int* originalData=NULL;
+	int* scaledData=NULL;
 	int scaledWidth,scaledHeight;
+
 	void init(int maxw,int maxh){
 		MAXWIDTH=maxw;MAXHEIGHT=maxh;
 		originalWidth=originalHeight=1;
-		originalData=new float[MAXWIDTH*MAXHEIGHT];
-		scaledData=new float[MAXWIDTH*MAXHEIGHT];
+		originalData=new int[MAXWIDTH*MAXHEIGHT];
+		scaledData=new int[MAXWIDTH*MAXHEIGHT];
 	}
 	#define DataRef(arr,x,y) ((arr)[(y)*MAXWIDTH+(x)])
 	float getColorAt(float x,float y){
@@ -56,30 +83,75 @@ namespace FrameImage{
 					+DataRef(scaledData,ix+1,iy)*x*(1-y)
 					+DataRef(scaledData,ix+1,iy+1)*x*y;
 	}
+	inline int getColorAt2(int x,int y){
+		return DataRef(scaledData, x, y);
+	}
+	
+	unsigned char hexnaly(unsigned char c)
+	{
+		unsigned char result = 0;
+		double d = c;
+		while (d > 0){
+			result++;
+			d -= (256.0 / 6.0);
+		}
+
+		return MAX_(result - 1, 0);
+	}
+
 	int hoge=0;
 	void update(CVPixelBufferRef img){
 		int width=CVPixelBufferGetWidth(img);
 		int height=CVPixelBufferGetHeight(img);
 		int bytesPerRow=CVPixelBufferGetBytesPerRow(img);
-		int bytesPerPixel=bytesPerRow/width;		
+		int bytesPerPixel=bytesPerRow/width;
 		CVPixelBufferLockBaseAddress(img,0);
 		unsigned char*data=(unsigned char*)CVPixelBufferGetBaseAddress(img);
-		unsigned char*rgb;
+		unsigned char* rgb;
 		#define imgBytesGetRGB(x,y) (data+bytesPerRow*(y)+bytesPerPixel*(x))
-		#define imgBytesGet(x,y) (rgb=imgBytesGetRGB(x,y),(0.298912*rgb[1]+0.586611*rgb[2]+0.114478*rgb[3])/(float)0xff);
-		for(int x=0;x<width;x++)for(int y=0;y<height;y++)DataRef(originalData,x,y)=imgBytesGet(x,y);
+		#define imgBytesGet(x,y) (rgb=imgBytesGetRGB(x,y), 16 + (hexnaly(rgb[1]) * 36) + ((hexnaly(rgb[2])) * 6) + hexnaly(rgb[3]))
+		//16 +([赤成分(0-5)] x 36) + ([緑成分(0-5)] x 6) + ([青成分(0-5)] x 1)
+		//for(int x=0;x<width;x++)for(int y=0;y<height;y++)DataRef(originalData,x,y)=imgBytesGet(x,y);
+		for(int x=0;x<width;x++){
+			for(int y=0;y<height;y++){
+				DataRef(originalData,x,y)=imgBytesGet(x,y);
+				//printf("%d %d %d %d\n", imgBytesGet(x, y), hexnaly(rgb[1]), hexnaly(rgb[2]), hexnaly(rgb[3]));
+				//printf("%d %d %d %d\n", WIDTH, HEIGHT, scaledWidth, scaledHeight);
+			}
+		}
 		CVPixelBufferUnlockBaseAddress(img,0);
 		originalWidth=width;originalHeight=height;
 		Request::render=true;
 	}
 	void scale(){
-		int width=originalWidth,height=originalHeight,s=1;
-		while((WIDTH-WOFFSET)*2<width||(HEIGHT-HOFFSET)*4<height){width/=2;height/=2;s*=2;}
+		int width=originalWidth,height=originalHeight;
+		//while((WIDTH-WOFFSET)*2<width||(HEIGHT-HOFFSET)*4<height){width/=2;height/=2;s*=2;}
+		/*
 		for(int x=0;x<width;x++)for(int y=0;y<height;y++){
-			float sum=0;
-			for(int ix=0;ix<s;ix++)for(int iy=0;iy<s;iy++)sum+=DataRef(originalData,s*x+ix,s*y+iy);
-			float col=sum/s/s;
+			int sum=0;
+			//for(int ix=0;ix<s;ix++)for(int iy=0;iy<s;iy++)sum+=DataRef(originalData,s*x+ix,s*y+iy);
+			//int col=sum/s/s;
+			int col = DataRef(originalData, s * x, s * y);
 			DataRef(scaledData,x,y)=colorFlip?1-col:col;
+		}*/
+		width = (WIDTH - WOFFSET);
+		height = (HEIGHT - HOFFSET);
+		double off_h, off_w;
+		off_h = (double)originalHeight / (double)height;
+		off_w = (double)originalWidth / (double)width;
+		for (int y = 0; y < height; y++){
+			for (int x = 0; x < width; x++){
+				/*
+				int sum = 0;
+				for (int iy = 0; iy < (int)off_h; iy++){
+					for (int ix = 0; ix < (int)off_w; ix++){
+						sum += DataRef(originalData, MIN_((int)(off_w * x + ix), originalWidth - 1), MIN_((int)(off_h * y + iy), originalHeight - 1));
+					}
+				}
+				*/
+				DataRef(scaledData, x, y) = DataRef(originalData, MIN_((int)(off_w * x), originalWidth - 1), MIN_((int)(off_h * y), originalHeight - 1));
+				//DataRef(scaledData, x, y) = sum / ((int)off_w * (int)off_h);
+			}
 		}
 		scaledWidth=width;scaledHeight=height;
 	}
@@ -201,7 +273,6 @@ void loadSettings(){
 		if(strcmp(key,"char")==0){
 			char ctFile[1024];
 			sprintf(ctFile,"%s%s",programDirectory(),value);
-			genCharTable(ctFile);
 		}
 		if(strcmp(key,"volume")==0)sscanf(value,"%f",&defaultVolume);
 		if(strcmp(key,"flip")==0)FrameImage::colorFlip=strcmp(value,"yes")==0;
@@ -317,7 +388,8 @@ void moviecallback(QTVisualContextRef visualContext,const CVTimeStamp *timeStamp
 }
 
 
-int main(int argc,char**argv){
+int main(int argc,char**argv)
+{
 	programDirectory(argv[0]);
 	loadSettings();
 	syncInit();
@@ -369,6 +441,9 @@ int main(int argc,char**argv){
 	duration=[movie duration];
 	[movie setVolume:volume=defaultVolume];
 	getWinSize();
+
+	cursesInit();
+
 	render();
 	while(true){
 		MoviesTask([movie quickTimeMovie],0);
@@ -415,7 +490,8 @@ int main(int argc,char**argv){
 		syncStart();
 		if(Request::render)render();
 		else if(Request::bottom)showBottom();
-		fflush(stdout);
+		refresh();
+		//doupdate();
 		syncEnd();
 	}
 	[pool release];
@@ -441,24 +517,55 @@ namespace FrameRate{
 void render(){
 	Request::render=false;
 	FrameImage::scale();
-	printf("\x1B[1;1H\x1B[K\x1B[1m%s  %s  [ %d x %d ]\x1B[m",playing?"playing":"paused ",movieFile,(int)movieSize.width,(int)movieSize.height);
+	//printf("\x1B[1;1H\x1B[K\x1B[1m%s  %s  [ %d x %d ]\x1B[m",playing?"playing":"paused ",movieFile,(int)movieSize.width,(int)movieSize.height);
 	
+	/*
 	double w=FrameImage::scaledWidth,h=FrameImage::scaledHeight/2;
 	int wof=0,hof=1;
 	while((WIDTH-2.0*wof)/HEIGHT-w/h>w/h-(WIDTH-2.0*wof-2)/HEIGHT)wof++;
 	while((HEIGHT-2.0*hof)/WIDTH-h/w>h/w-(HEIGHT-2.0*hof-2)/WIDTH)hof++;
-	for(int y=1;y<HEIGHT-1;y++){
-		printf("\x1B[%d;1H",y+1);
-		for(int x=0;x<WIDTH;x++){
+	*/
+#if 0
+	for(int y=0;y<FrameImage::scaledHeight;y++){
+		printf("\x1B[%d;1H",y+2);
+		for(int x=0;x<FrameImage::scaledWidth;x++){
+			int a;
+			fprintf(stdout, "\e[48;5;%dm ", a=FrameImage::getColorAt2(x, y));
+			/*
 			int a=0x100*FrameImage::getColorAt((x+0.5-wof)/(WIDTH-2*wof),(y+0.25-hof)/(HEIGHT-2*hof));
 			int b=0x100*FrameImage::getColorAt((x+0.5-wof)/(WIDTH-2*wof),(y+0.75-hof)/(HEIGHT-2*hof));
 			putc(charTable[a>0xff?0xff:a][b>0xff?0xff:b],stdout);
+			*/
 		}
 	}
+	printf("\x1b[49m");
+#else
+
+#define SKIP (1)
+	static int  sw = 0;
+	for(int y=sw;y<FrameImage::scaledHeight;y += SKIP){
+		//printf("\x1B[%d;1H",y+2);
+		move(y+1, 1);
+		for(int x=0;x<FrameImage::scaledWidth;x++){
+			attron(COLOR_PAIR(FrameImage::getColorAt2(x, y)) | A_NORMAL);
+			addch(' ');
+			//attroff(COLOR_PAIR(FrameImage::getColorAt2(x, y)) | A_NORMAL);
+			//printf("\e[48;5;%dm ", a=FrameImage::getColorAt2(x, y));
+			/*
+			   int a=0x100*FrameImage::getColorAt((x+0.5-wof)/(WIDTH-2*wof),(y+0.25-hof)/(HEIGHT-2*hof));
+			   int b=0x100*FrameImage::getColorAt((x+0.5-wof)/(WIDTH-2*wof),(y+0.75-hof)/(HEIGHT-2*hof));
+			   putc(charTable[a>0xff?0xff:a][b>0xff?0xff:b],stdout);
+			 */
+		}
+	}
+	//printf("\x1b[49m");
+	sw = (sw + 1) % SKIP;
+#endif
 	showBottom();
 }
 void showBottom(){
 	Request::bottom=false;
+	/*
 	int ctime=currenttime.timeValue/(currenttime.timeScale==0?1:currenttime.timeScale);
 	int dtime=duration.timeValue/(duration.timeScale==0?1:duration.timeScale);
 	int fr=(int)(10*FrameRate::getFrameRate()+0.5);if(fr>999)fr=999;
@@ -471,4 +578,6 @@ void showBottom(){
 	printf("%02d:%02d:%02d / %02d:%02d:%02d",ctime/60/60,ctime/60%60,ctime%60,dtime/60/60,dtime/60%60,dtime%60);
 	
 	printf("\x1B[m  > %s",INPUT::text);
+	*/
 }
+
